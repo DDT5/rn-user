@@ -1,10 +1,16 @@
 use cosmwasm_std::{
-    debug_print, to_binary, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier,
-    StdError, StdResult, Storage,
+    debug_print, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier, to_binary,
+    StdError, StdResult, Storage, HumanAddr, log, Uint128
 };
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use secret_toolkit::utils::{HandleCallback}; //pad_handle_result, pad_query_result, Query,  
 
-use crate::msg::{CountResponse, HandleMsg, InitMsg, QueryMsg};
-use crate::state::{config, config_read, State};
+use crate::msg::{HandleMsg, QueryMsg, InitMsg, QueryResponse};
+use crate::state::{config, config_read, State}; 
+
+const BLOCK_SIZE: usize = 256;
+
 
 pub fn init<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -12,8 +18,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
     let state = State {
-        count: msg.count,
-        owner: deps.api.canonical_address(&env.message.sender)?,
+        rng_addr: deps.api.canonical_address(&HumanAddr(msg.rng_addr))?,
     };
 
     config(&mut deps.storage).save(&state)?;
@@ -23,129 +28,111 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     Ok(InitResponse::default())
 }
 
+
+/////////////////////////////////////////////////////////////////////////////////
+// Enums for callback
+/////////////////////////////////////////////////////////////////////////////////
+
+// Calling handle in another contract
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallbackRnMsg {
+    CallbackRn {entropy: String, cb_msg: Binary, callback_code_hash: String, contract_addr: String},
+}
+
+impl HandleCallback for CallbackRnMsg {
+    const BLOCK_SIZE: usize = BLOCK_SIZE;
+}
+
+
+
+/////////////////////////////////////////////////////////////////////////////////
+// Handles
+/////////////////////////////////////////////////////////////////////////////////
 pub fn handle<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
     msg: HandleMsg,
 ) -> StdResult<HandleResponse> {
     match msg {
-        HandleMsg::Increment {} => try_increment(deps, env),
-        HandleMsg::Reset { count } => try_reset(deps, env, count),
+        HandleMsg::CallRn {entropy, cb_msg, rng_hash, rng_addr} => try_call_rn(deps, env, entropy, cb_msg, rng_hash, rng_addr),
+        HandleMsg::ReceiveRn {rn, cb_msg } => try_receive_rn(deps, env, rn, cb_msg),
     }
 }
 
-pub fn try_increment<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    _env: Env,
+pub fn try_call_rn<S: Storage, A: Api, Q: Querier>(
+    _deps: &mut Extern<S, A, Q>,
+    env: Env,
+    entropy: String,
+    cb_msg: Binary,
+    rng_hash: String,
+    rng_addr: String,
 ) -> StdResult<HandleResponse> {
-    config(&mut deps.storage).update(|mut state| {
-        state.count += 1;
-        debug_print!("count = {}", state.count);
-        Ok(state)
-    })?;
+    let callback_rn_msg = CallbackRnMsg::CallbackRn {
+        entropy: entropy,
+        cb_msg: cb_msg,
+        callback_code_hash: env.contract_code_hash.to_string(),  // to_string() necessary?
+        contract_addr: env.contract.address.to_string(),
+    };
 
-    debug_print("count incremented successfully");
-    Ok(HandleResponse::default())
+    let cosmos_msg = callback_rn_msg.to_cosmos_msg(
+        rng_hash,
+        HumanAddr(rng_addr),
+        Some(Uint128(100_000))  // assuming min fees of 100_000 uscrt
+    )?;
+
+    Ok(HandleResponse {
+        messages: vec![cosmos_msg],
+        log: vec![],
+        data: None
+    })
+
+    // Ok(HandleResponse::default())
 }
 
-pub fn try_reset<S: Storage, A: Api, Q: Querier>(
+pub fn try_receive_rn<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: Env,
-    count: i32,
+    rn: [u8; 32],
+    cb_msg: Binary,
 ) -> StdResult<HandleResponse> {
-    let sender_address_raw = deps.api.canonical_address(&env.message.sender)?;
-    config(&mut deps.storage).update(|mut state| {
-        if sender_address_raw != state.owner {
-            return Err(StdError::Unauthorized { backtrace: None });
-        }
-        state.count = count;
-        Ok(state)
-    })?;
-    debug_print("count reset successfully");
-    Ok(HandleResponse::default())
+    let config: State = config_read(&deps.storage).load()?;
+    let apprv_sender = config.rng_addr;
+    // let apprv_sender = deps.api.canonical_address(&env.contract.address)?;  //<-- for user contract, set to scrt-rng's contract addr
+    let sender = deps.api.canonical_address(&env.message.sender)?;
+    if apprv_sender != sender {
+        return Err(StdError::generic_err(
+            "receive_rn did not approve sender address",
+        ));
+    }
+    
+    let consumer_output = format!("Original message: {:?}, combined with rn: {:?}", 
+    String::from_utf8(cb_msg.as_slice().to_vec()),   // <-- will only display properly if the cb_msg input is a String
+    rn);
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: vec![log("output", consumer_output)],
+        data: None,
+    })
+    // Ok(HandleResponse::default())
 }
 
+
+/////////////////////////////////////////////////////////////////////////////////
+// Queries
+/////////////////////////////////////////////////////////////////////////////////
 pub fn query<S: Storage, A: Api, Q: Querier>(
     deps: &Extern<S, A, Q>,
     msg: QueryMsg,
 ) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetCount {} => to_binary(&query_count(deps)?),
+        QueryMsg::GetRngAddr {} => to_binary(&try_get_rng_addr(deps)?),
     }
 }
 
-fn query_count<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<CountResponse> {
+fn try_get_rng_addr<S: Storage, A: Api, Q: Querier>(deps: &Extern<S, A, Q>) -> StdResult<QueryResponse> {
     let state = config_read(&deps.storage).load()?;
-    Ok(CountResponse { count: state.count })
+    Ok(QueryResponse {rng_addr: deps.api.human_address(&state.rng_addr)?})
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cosmwasm_std::testing::{mock_dependencies, mock_env};
-    use cosmwasm_std::{coins, from_binary, StdError};
-
-    #[test]
-    fn proper_initialization() {
-        let mut deps = mock_dependencies(20, &[]);
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(1000, "earth"));
-
-        // we can just call .unwrap() to assert this was a success
-        let res = init(&mut deps, env, msg).unwrap();
-        assert_eq!(0, res.messages.len());
-
-        // it worked, let's query the state
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(17, value.count);
-    }
-
-    #[test]
-    fn increment() {
-        let mut deps = mock_dependencies(20, &coins(2, "token"));
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(2, "token"));
-        let _res = init(&mut deps, env, msg).unwrap();
-
-        // anyone can increment
-        let env = mock_env("anyone", &coins(2, "token"));
-        let msg = HandleMsg::Increment {};
-        let _res = handle(&mut deps, env, msg).unwrap();
-
-        // should increase counter by 1
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(18, value.count);
-    }
-
-    #[test]
-    fn reset() {
-        let mut deps = mock_dependencies(20, &coins(2, "token"));
-
-        let msg = InitMsg { count: 17 };
-        let env = mock_env("creator", &coins(2, "token"));
-        let _res = init(&mut deps, env, msg).unwrap();
-
-        // not anyone can reset
-        let unauth_env = mock_env("anyone", &coins(2, "token"));
-        let msg = HandleMsg::Reset { count: 5 };
-        let res = handle(&mut deps, unauth_env, msg);
-        match res {
-            Err(StdError::Unauthorized { .. }) => {}
-            _ => panic!("Must return unauthorized error"),
-        }
-
-        // only the original creator can reset the counter
-        let auth_env = mock_env("creator", &coins(2, "token"));
-        let msg = HandleMsg::Reset { count: 5 };
-        let _res = handle(&mut deps, auth_env, msg).unwrap();
-
-        // should now be 5
-        let res = query(&deps, QueryMsg::GetCount {}).unwrap();
-        let value: CountResponse = from_binary(&res).unwrap();
-        assert_eq!(5, value.count);
-    }
-}
