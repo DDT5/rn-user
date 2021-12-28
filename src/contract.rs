@@ -19,6 +19,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<InitResponse> {
     let state = State {
         rng_addr: deps.api.canonical_address(&HumanAddr(msg.rng_addr))?,
+        rng_interf_addr: deps.api.canonical_address(&HumanAddr(msg.rng_interf_addr))?,
     };
 
     config(&mut deps.storage).save(&state)?;
@@ -97,10 +98,10 @@ pub fn try_receive_rn<S: Storage, A: Api, Q: Querier>(
     cb_msg: Binary,
 ) -> StdResult<HandleResponse> {
     let config: State = config_read(&deps.storage).load()?;
-    let apprv_sender = config.rng_addr;
+    // let apprv_sender = config.rng_addr;
     // let apprv_sender = deps.api.canonical_address(&env.contract.address)?;  //<-- for user contract, set to scrt-rng's contract addr
     let sender = deps.api.canonical_address(&env.message.sender)?;
-    if apprv_sender != sender {
+    if (sender != config.rng_addr) & (sender !=  config.rng_interf_addr)  {
         return Err(StdError::generic_err(
             "receive_rn did not approve sender address",
         ));
