@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     debug_print, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier, to_binary,
-    StdError, StdResult, Storage, HumanAddr, log, Uint128
+    StdError, StdResult, Storage, HumanAddr, log, Uint128, // CanonicalAddr, 
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,28 @@ impl HandleCallback for CallbackRnMsg {
     const BLOCK_SIZE: usize = BLOCK_SIZE;
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CreateRnMsg {
+    CreateRn {
+        entropy: String, cb_msg: Binary, receiver_code_hash: String, 
+        receiver_addr: Option<String>, purpose: Option<String>, max_blk_delay: Option<u64>,
+    },
+}
 
+impl HandleCallback for CreateRnMsg {
+    const BLOCK_SIZE: usize = BLOCK_SIZE;
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FulfillRnMsg {
+    FulfillRn {creator_addr: String, receiver_code_hash: String, purpose: Option<String>},
+}
+
+impl HandleCallback for FulfillRnMsg {
+    const BLOCK_SIZE: usize = BLOCK_SIZE;
+}
 
 /////////////////////////////////////////////////////////////////////////////////
 // Handles
@@ -58,6 +79,12 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
     match msg {
         HandleMsg::CallRn {entropy, cb_msg, rng_hash, rng_addr} => try_call_rn(deps, env, entropy, cb_msg, rng_hash, rng_addr),
         HandleMsg::ReceiveRn {rn, cb_msg } => try_receive_rn(deps, env, rn, cb_msg),
+        HandleMsg::ReceiveFRn {rn, cb_msg, purpose} => try_receive_fulfill_rn(deps, env, rn, cb_msg, purpose),
+        HandleMsg::TriggerCreateRn {
+            entropy, cb_msg, receiver_code_hash, receiver_addr, purpose, max_blk_delay, rng_hash, rng_addr,
+        } => try_trigger_create_rn (deps, env, entropy, cb_msg, receiver_code_hash, receiver_addr, purpose, max_blk_delay, rng_hash, rng_addr),
+        HandleMsg::TriggerFulfillRn {creator_addr, receiver_code_hash, purpose, rng_hash, rng_addr
+        } => try_trigger_fulfill_rn(deps, env, creator_addr, receiver_code_hash, purpose, rng_hash, rng_addr)
     }
 }
 
@@ -106,19 +133,110 @@ pub fn try_receive_rn<S: Storage, A: Api, Q: Querier>(
             "receive_rn did not approve sender address",
         ));
     }
-    
-    let consumer_output = format!("Original message: {:?}, combined with rn: {:?}", 
-    String::from_utf8(cb_msg.as_slice().to_vec()),   // <-- will only display properly if the cb_msg input is a String
-    rn);
+
+    let cb_msg_deserialized = String::from_utf8(cb_msg.as_slice().to_vec()).unwrap();  // <-- will only display properly if the cb_msg input is a String
+    let log_output = vec![
+        log("rn", format!("{:?}",rn)),
+        log("cb_msg", cb_msg_deserialized),
+    ];  
+
+    // let consumer_output = format!("Original message: {:?}, combined with rn: {:?}", 
+    // String::from_utf8(cb_msg.as_slice().to_vec()),   // <-- will only display properly if the cb_msg input is a String
+    // rn);
 
     Ok(HandleResponse {
         messages: vec![],
-        log: vec![log("output", consumer_output)],
+        log: log_output,
         data: None,
     })
     // Ok(HandleResponse::default())
 }
 
+pub fn try_trigger_create_rn<S: Storage, A: Api, Q:Querier>(
+    _deps: &mut Extern<S, A, Q>,
+    _env: Env,
+    entropy: String, 
+    cb_msg: Binary, 
+    receiver_code_hash: String, 
+    receiver_addr: Option<String>, 
+    purpose: Option<String>, 
+    max_blk_delay: Option<u64>,
+    rng_hash: String,
+    rng_addr: String,
+) -> StdResult<HandleResponse> {
+    let create_rn_msg = CreateRnMsg::CreateRn { 
+        entropy: entropy, 
+        cb_msg: cb_msg, 
+        receiver_code_hash: receiver_code_hash, 
+        receiver_addr: receiver_addr, 
+        purpose: purpose, 
+        max_blk_delay: max_blk_delay,
+    };
+
+    let cosmos_msg = create_rn_msg.to_cosmos_msg(
+        rng_hash, 
+        HumanAddr(rng_addr), 
+        None,
+    )?;
+
+    Ok(HandleResponse {
+        messages: vec![cosmos_msg],
+        log: vec![],
+        data:None,
+    })
+}
+
+pub fn try_trigger_fulfill_rn<S: Storage, A: Api, Q: Querier>(
+    _deps: &mut Extern<S, A, Q>, 
+    _env: Env, 
+    creator_addr: String,
+    receiver_code_hash: String,
+    purpose: Option<String>,
+    rng_hash: String, 
+    rng_addr: String,
+) -> StdResult<HandleResponse> {
+    let fulfill_rn_msg = FulfillRnMsg::FulfillRn {
+        creator_addr: creator_addr,
+        receiver_code_hash: receiver_code_hash,
+        purpose: purpose,
+    };
+
+    let cosmos_msg = fulfill_rn_msg.to_cosmos_msg(
+        rng_hash,
+        HumanAddr(rng_addr),
+        None
+    )?;
+
+    Ok(HandleResponse {
+        messages: vec![cosmos_msg],
+        log: vec![],
+        data:None,
+    })
+}
+
+pub fn try_receive_fulfill_rn<S: Storage, A: Api, Q: Querier>(
+    _deps: &mut Extern<S, A, Q>, 
+    _env: Env, 
+    rn: [u8; 32], 
+    cb_msg: Binary, 
+    purpose: Option<String>
+) -> StdResult<HandleResponse> {
+    debug_print!("RN user::try_receive_transmit_rn: initiated");
+    let cb_msg_deserialized = String::from_utf8(cb_msg.as_slice().to_vec()).unwrap(); // from_binary::<String>(&cb_msg)?;
+    debug_print!("RN user::try_receive_transmit_rn: cb_msg deserialized");
+    let log_output = vec![
+        log("rn", format!("{:?}",rn)),
+        log("cb_msg", cb_msg_deserialized),
+        log("purpose", format!("{:?}",purpose)),
+    ]; 
+    debug_print!("RN user::try_receive_transmit_rn: log_output created");
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: log_output,
+        data:None,
+    })
+} 
 
 /////////////////////////////////////////////////////////////////////////////////
 // Queries
