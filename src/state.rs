@@ -9,7 +9,7 @@ pub static CONFIG_KEY: &[u8] = b"config";
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct State {
     pub rng_addr: CanonicalAddr,
-    pub rng_interf_addr: CanonicalAddr,
+    // pub rng_interf_addr: CanonicalAddr,
 }
 
 pub fn config<S: Storage>(storage: &mut S) -> Singleton<S, State> {
