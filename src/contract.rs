@@ -1,6 +1,6 @@
 use cosmwasm_std::{
     debug_print, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier, to_binary,
-    StdError, StdResult, Storage, HumanAddr, log, Uint128, // CanonicalAddr, 
+    StdError, StdResult, Storage, HumanAddr, log, //Uint128, // CanonicalAddr, 
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -106,7 +106,7 @@ pub fn try_call_rn<S: Storage, A: Api, Q: Querier>(
     let cosmos_msg = callback_rn_msg.to_cosmos_msg(
         rng_hash,
         HumanAddr(rng_addr),
-        Some(Uint128(100_000))  // assuming min fees of 100_000 uscrt
+        None // Some(Uint128(100_000)) 
     )?;
 
     Ok(HandleResponse {
