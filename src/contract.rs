@@ -2,15 +2,15 @@ use cosmwasm_std::{
     debug_print, Api, Binary, Env, Extern, HandleResponse, InitResponse, Querier, to_binary,
     StdError, StdResult, Storage, HumanAddr, log, //Uint128, // CanonicalAddr, 
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use secret_toolkit::utils::{HandleCallback}; //pad_handle_result, pad_query_result, Query,  
 
-use crate::msg::{HandleMsg, QueryMsg, InitMsg, QueryResponse};
-use crate::state::{config, config_read, State}; 
+use crate::msg::{
+    HandleMsg, QueryMsg, InitMsg, QueryResponse, CallbackRnMsg, CreateRnMsg, FulfillRnMsg, GenerateViewingKeyMsg,
+    QueryRnMsg, QueryAnswerMsg,
+};
+use crate::state::{config, config_read, State, config_vk, config_read_vk, VkStore}; 
 
-const BLOCK_SIZE: usize = 256;
-
+use crate::viewing_key::{ViewingKey}; 
+use secret_toolkit::utils::{HandleCallback, Query}; //pad_handle_result, pad_query_result, 
 
 pub fn init<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -18,55 +18,22 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
     msg: InitMsg,
 ) -> StdResult<InitResponse> {
     let state = State {
+        rng_hash: msg.rng_hash,
         rng_addr: deps.api.canonical_address(&HumanAddr(msg.rng_addr))?,
         // rng_interf_addr: deps.api.canonical_address(&HumanAddr(msg.rng_interf_addr))?,
     };
-
     config(&mut deps.storage).save(&state)?;
+    
+    let vk = VkStore {
+        vks: vec![],
+    };
+    config_vk(&mut deps.storage).save(&vk)?;
 
     debug_print!("Contract was initialized by {}", env.message.sender);
 
     Ok(InitResponse::default())
 }
 
-
-/////////////////////////////////////////////////////////////////////////////////
-// Enums for callback
-/////////////////////////////////////////////////////////////////////////////////
-
-// Calling handle in another contract
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CallbackRnMsg {
-    CallbackRn {entropy: String, cb_msg: Binary, callback_code_hash: String, contract_addr: String},
-}
-
-impl HandleCallback for CallbackRnMsg {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum CreateRnMsg {
-    CreateRn {
-        entropy: String, cb_msg: Binary, receiver_code_hash: String, 
-        receiver_addr: Option<String>, purpose: Option<String>, max_blk_delay: Option<u64>,
-    },
-}
-
-impl HandleCallback for CreateRnMsg {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum FulfillRnMsg {
-    FulfillRn {creator_addr: String, receiver_code_hash: String, purpose: Option<String>},
-}
-
-impl HandleCallback for FulfillRnMsg {
-    const BLOCK_SIZE: usize = BLOCK_SIZE;
-}
 
 /////////////////////////////////////////////////////////////////////////////////
 // Handles
@@ -84,7 +51,11 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             entropy, cb_msg, receiver_code_hash, receiver_addr, purpose, max_blk_delay, rng_hash, rng_addr,
         } => try_trigger_create_rn (deps, env, entropy, cb_msg, receiver_code_hash, receiver_addr, purpose, max_blk_delay, rng_hash, rng_addr),
         HandleMsg::TriggerFulfillRn {creator_addr, receiver_code_hash, purpose, rng_hash, rng_addr
-        } => try_trigger_fulfill_rn(deps, env, creator_addr, receiver_code_hash, purpose, rng_hash, rng_addr)
+        } => try_trigger_fulfill_rn(deps, env, creator_addr, receiver_code_hash, purpose, rng_hash, rng_addr),
+        HandleMsg::TriggerGenerateVk {receiver_code_hash, rng_hash, rng_addr,
+        } => try_trigger_generate_vk(deps, env, receiver_code_hash, rng_hash, rng_addr),
+        HandleMsg::ReceiveViewingKey {key,} => try_receive_viewing_key(deps, env, key),
+        HandleMsg::TriggerQueryRn {entropy, optionalvk} => try_trigger_query_rn(deps, env, entropy, optionalvk),
     }
 }
 
@@ -237,6 +208,91 @@ pub fn try_receive_fulfill_rn<S: Storage, A: Api, Q: Querier>(
         data:None,
     })
 } 
+
+pub fn try_trigger_generate_vk<S: Storage, A: Api, Q: Querier>(
+    _deps: &mut Extern<S, A, Q>, 
+    _env: Env, 
+    // entropy: String, 
+    receiver_code_hash: String, 
+    // padding: Option<String>, 
+    rng_hash: String, 
+    rng_addr: String,
+) -> StdResult<HandleResponse> {
+    let entropy = "any entropy here".to_string();
+    let gen_vk_msg = GenerateViewingKeyMsg::GenerateViewingKey {
+        entropy,
+        receiver_code_hash,
+        padding: None,
+    };
+
+    let cosmos_msg = gen_vk_msg.to_cosmos_msg(
+        rng_hash,
+        HumanAddr(rng_addr),
+        None
+    )?;
+
+    Ok(HandleResponse {
+        messages: vec![cosmos_msg],
+        log: vec![],
+        data: None,
+    })
+}
+
+pub fn try_receive_viewing_key<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>, 
+    _env: Env, 
+    key: ViewingKey,
+) -> StdResult<HandleResponse> {
+    let mut keys = config_read_vk(&deps.storage).load()?;
+    keys.vks.push(key.clone());
+
+    config_vk(&mut deps.storage).save(&keys)?;
+    
+    let log_output = vec![
+        log("added vk", format!("{:}", key)),
+        log("current vks", format!("{:?}", keys.vks)),
+    ]; 
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: log_output,
+        data: None,
+    })
+    // Ok(HandleResponse::default())
+}
+
+pub fn try_trigger_query_rn<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>, 
+    env: Env, 
+    entropy: String,
+    optionalvk: Option<String>, // if None, then uses vk in storage, which is the anticipated design of future scrt-rng contracts. Some() functionality for debugging only 
+    // addr: HumanAddr,
+    // vk: String,
+) -> StdResult<HandleResponse> {
+    let state = config_read(&mut deps.storage).load()?;
+    let vk_store = config_read_vk(&mut deps.storage).load()?;
+    let vk = match optionalvk {
+        Some(i) => i,
+        None => vk_store.vks[0].to_string(),
+    };
+    debug_print!("vk being used is: {}", &vk);
+
+    let query_msg = QueryRnMsg::QueryRn {entropy: entropy, addr: env.contract.address, vk: vk};
+    let query_ans: QueryAnswerMsg = query_msg.query(   //: StdResult<Binary>   QueryAnswerMsg 
+        &deps.querier, 
+        state.rng_hash, 
+        deps.api.human_address(&state.rng_addr)?,
+    )?;
+
+    let output_log = format!("{:?}", query_ans.rn_output.rn);
+
+    Ok(HandleResponse {
+        messages: vec![],
+        log: vec![log("output", output_log)],
+        data: None,
+    })
+    // Ok(HandleResponse::default())
+}
 
 /////////////////////////////////////////////////////////////////////////////////
 // Queries

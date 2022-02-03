@@ -1,16 +1,17 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "InitMsg",
+  "title": "QueryResponse",
   "type": "object",
   "required": [
-    "rng_addr",
-    "rng_hash"
+    "rng_addr"
   ],
   "properties": {
     "rng_addr": {
-      "type": "string"
-    },
-    "rng_hash": {
+      "$ref": "#/definitions/HumanAddr"
+    }
+  },
+  "definitions": {
+    "HumanAddr": {
       "type": "string"
     }
   }
